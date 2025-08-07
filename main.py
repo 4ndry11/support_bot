@@ -56,9 +56,8 @@ def init_gsheets():
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
     ]
-    json_creds = os.environ["GSHEETS_CREDENTIALS_JSON"]
-    creds_dict = json.loads(json_creds)
-    creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
+    creds_path = "/etc/secrets/gsheets.json"  # путь по умолчанию в Render
+    creds = Credentials.from_service_account_file(creds_path, scopes=scope)
     client = gspread.authorize(creds)
     sheet = client.open(os.environ["SPREADSHEET_NAME"]).sheet1
     return sheet
@@ -66,7 +65,7 @@ def init_gsheets():
 
 # === Парсинг сообщений ===
 def parse_message(text: str):
-    match = re.match(r"^(CL1|CL2|CL3|SMS|SEC|CNF|NEW|REP)\s+(\+?[0-9]+)\s*\|\s*(.+)$", text.strip(), re.IGNORECASE)
+    match = re.match(r"^(CL1|CL2|CL3|SMS|SEC|CNF|NEW|REP|HS1|HS2|HS3)\s+(\+?[0-9]+)\s*\|\s*(.+)$", text.strip(), re.IGNORECASE)
     if not match:
         return None
     code, phone, comment = match.groups()
