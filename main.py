@@ -30,7 +30,8 @@ CLIENT_TYPE_ID="Клієнт"
 BIRTHDAY_CHATS=-1003053461710
 
 # таймзона для "сьогодні"
-TIMEZONE='Europe/Kyiv'
+TIMEZONE = os.environ.get("TIMEZONE", "Europe/Kyiv")
+TZ = ZoneInfo(TIMEZONE)
 
 # антидубль на день (1 вкл, 0 викл)
 DEDUP_PER_DAY=1
@@ -544,7 +545,7 @@ def main():
     # === JobQueue: щодня о 09:00 за вашою TZ ===
     # Можеш змінити час тут:
     run_hour = 11
-    run_minute = 5
+    run_minute = 10
     job_time = datetime.now(TZ).replace(hour=run_hour, minute=run_minute, second=0, microsecond=0).timetz()
 
     jq = updater.job_queue
