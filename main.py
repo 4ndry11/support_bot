@@ -9,7 +9,10 @@ from telegram.ext import Updater, MessageHandler, Filters, CallbackContext, Comm
 from google.oauth2.service_account import Credentials
 from collections import Counter
 from typing import List, Dict, Any, Optional
-from zoneinfo import ZoneInfo
+import pytz
+
+TIMEZONE = os.environ.get("TIMEZONE", "Europe/Kyiv")
+TZ = pytz.timezone(TIMEZONE)
 
 # === НАСТРОЙКИ ===
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -28,10 +31,6 @@ CLIENT_TYPE_ID="Клієнт"
 
 # куди слати нагадування (через кому — можна один і той самий чат, де бот вже працює)
 BIRTHDAY_CHATS=-1003053461710
-
-# таймзона для "сьогодні"
-TIMEZONE = os.environ.get("TIMEZONE", "Europe/Kyiv")
-TZ = ZoneInfo(TIMEZONE)
 
 # антидубль на день (1 вкл, 0 викл)
 DEDUP_PER_DAY=1
