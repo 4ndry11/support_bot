@@ -546,21 +546,28 @@ def main():
     # Логирование рабочих сообщений
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
 
-    # Ежедневная проверка ДР (apscheduler требует pytz)
     import datetime as _dt
     try:
         tz = pytz.timezone(TZ_NAME)
     except Exception:
         tz = pytz.utc
+
+    # Старт polling
+    updater.start_polling()
+
+    # Регистрируем job после старта polling (ВАЖНО!)
     job_queue = updater.job_queue
     job_queue.run_daily(
         notify_birthday_today,
         time=_dt.time(hour=BIRTHDAY_CHECK_HOUR, minute=BIRTHDAY_CHECK_MINUTE, tzinfo=tz),
         name="daily_birthdays"
     )
+    print(f"✅ Daily birthday report scheduled at {BIRTHDAY_CHECK_HOUR}:{BIRTHDAY_CHECK_MINUTE} {TZ_NAME}")
 
-    updater.start_polling()
     updater.idle()
+
+if __name__ == "__main__":
+    main()
 
 if __name__ == "__main__":
     main()
