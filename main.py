@@ -8,11 +8,6 @@ from telegram import Update
 from telegram.ext import Updater, MessageHandler, Filters, CallbackContext, CommandHandler
 from google.oauth2.service_account import Credentials
 from collections import Counter
-from typing import List, Dict, Any, Optional
-import pytz
-
-TIMEZONE = os.environ.get("TIMEZONE", "Europe/Kyiv")
-TZ = pytz.timezone(TIMEZONE)
 
 # === НАСТРОЙКИ ===
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -25,16 +20,6 @@ BITRIX_TASK_URL = os.environ["BITRIX_TASK_URL"]        # task.item.add
 SPREADSHEET_NAME = os.environ["SPREADSHEET_NAME"]
 
 RESPONSIBLE_ID = 596
-
-# опційно: TYPE_ID для "Клієнт" (якщо знаєш точне)
-CLIENT_TYPE_ID="Клієнт"
-
-# куди слати нагадування (через кому — можна один і той самий чат, де бот вже працює)
-BIRTHDAY_CHATS=-1003053461710
-
-# антидубль на день (1 вкл, 0 викл)
-DEDUP_PER_DAY=1
-
 
 # Категории
 CATEGORIES = {
@@ -127,195 +112,6 @@ def find_contact_by_phone(phone):
             if clean_phone(ph.get("VALUE", "")) == clean_phone(norm_phone_full):
                 return c
     return None
-
-def _make_b24_url(method_name: str) -> str:
-    """
-    Робимо URL для іншого методу Bitrix24 на базі вже наявного вебхука.
-    Напр.: crm.contact.list -> user.search / crm.status.list / crm.timeline.comment.add
-    """
-    if "crm.contact.list" in BITRIX_CONTACT_URL:
-        return BITRIX_CONTACT_URL.replace("crm.contact.list", method_name)
-    # fallback: якщо BITRIX_CONTACT_URL інший — просто підмінюємо все після останнього "/"
-    base = BITRIX_CONTACT_URL.rsplit("/", 1)[0]
-    return f"{base}/{method_name}"
-
-def _b24_paginated_get(url: str, params: Dict[str, Any], result_key: str = "result") -> List[Dict[str, Any]]:
-    """
-    Гет із посторінковою вибіркою (Bitrix24 повертає 'next'; додаємо &start=...).
-    """
-    out: List[Dict[str, Any]] = []
-    start = 0
-    while True:
-        q = params.copy()
-        q["start"] = start
-        r = requests.get(url, params=q, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-        chunk = data.get(result_key, [])
-        if isinstance(chunk, dict) and "items" in chunk:  # іноді result = { items: [...] }
-            chunk = chunk["items"]
-        out.extend(chunk)
-        next_start = data.get("next")
-        if next_start is None:
-            break
-        start = next_start
-    return out
-
-def _normalize_date(s: str) -> Optional[datetime]:
-    if not s:
-        return None
-    s = s.strip()
-    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S"):
-        try:
-            if "%z" in fmt:
-                return datetime.strptime(s, fmt).astimezone(TZ)
-            return datetime.strptime(s, fmt).replace(tzinfo=TZ)
-        except ValueError:
-            continue
-    return None
-
-def _today_mm_dd() -> tuple[int, int]:
-    now = datetime.now(TZ)
-    return now.month, now.day
-
-def _phones_from_contact(item: Dict[str, Any]) -> List[str]:
-    vals = []
-    for ph in item.get("PHONE", []) or []:
-        v = (ph.get("VALUE") or "").strip()
-        if v:
-            vals.append(v)
-    return vals
-
-def _emails_from_contact(item: Dict[str, Any]) -> List[str]:
-    vals = []
-    for em in item.get("EMAIL", []) or []:
-        v = (em.get("VALUE") or "").strip()
-        if v:
-            vals.append(v)
-    return vals
-
-def _fio_from_bits(obj: Dict[str, Any]) -> str:
-    parts = [obj.get("LAST_NAME") or "", obj.get("NAME") or "", obj.get("SECOND_NAME") or ""]
-    return " ".join(p for p in parts if p).strip()
-
-def _contacts_birthday_today() -> List[Dict[str, Any]]:
-    _resolve_client_type_id()
-    url = BITRIX_CONTACT_URL  # crm.contact.list
-    select = ["ID", "NAME", "SECOND_NAME", "LAST_NAME", "TYPE_ID", "BIRTHDATE", "PHONE", "EMAIL"]
-    contacts = _b24_paginated_get(url, {"select[]": select, "filter[!BIRTHDATE]": None, "order[ID]": "ASC"})
-    mm, dd = _today_mm_dd()
-    out = []
-    for c in contacts:
-        bd = _normalize_date(c.get("BIRTHDATE") or "")
-        if not bd:
-            continue
-        if bd.month == mm and bd.day == dd:
-            if CLIENT_TYPE_ID:  # фільтр лише Клієнтів
-                if str(c.get("TYPE_ID", "")).strip() != str(CLIENT_TYPE_ID):
-                    continue
-            out.append(c)
-    return out
-
-def _users_birthday_today() -> List[Dict[str, Any]]:
-    url = _make_b24_url("user.search")
-    # user.search повертає список співробітників; додатково вибирати поля не обов'язково, але вони там є
-    users = _b24_paginated_get(url, {"FILTER[ACTIVE]": True}, result_key="result")
-    mm, dd = _today_mm_dd()
-    out = []
-    for u in users:
-        bd = _normalize_date(u.get("PERSONAL_BIRTHDAY") or "")
-        if bd and bd.month == mm and bd.day == dd:
-            out.append(u)
-    return out
-
-def _load_birthday_cache() -> Dict[str, Any]:
-    if not os.path.exists(BIRTHDAY_CACHE_FILE):
-        return {}
-    try:
-        with open(BIRTHDAY_CACHE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-def _save_birthday_cache(c: Dict[str, Any]) -> None:
-    try:
-        with open(BIRTHDAY_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(c, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"Cache write error: {e}")
-
-def _already_sent_today(key: str) -> bool:
-    if not DEDUP_PER_DAY:
-        return False
-    cache = _load_birthday_cache()
-    today = datetime.now(TZ).strftime("%Y-%m-%d")
-    return cache.get(key) == today
-
-def _mark_sent_today(key: str) -> None:
-    if not DEDUP_PER_DAY:
-        return
-    cache = _load_birthday_cache()
-    today = datetime.now(TZ).strftime("%Y-%m-%d")
-    cache[key] = today
-    _save_birthday_cache(cache)
-
-def _build_birthday_message(contacts: List[Dict[str, Any]], users: List[Dict[str, Any]]) -> Optional[str]:
-    if not contacts and not users:
-        return None
-    date_str = datetime.now(TZ).strftime("%d.%m")
-    lines = [f"🎉 <b>Дні народження на {date_str}</b>"]
-
-    if contacts:
-        lines.append("\n<b>Клієнти:</b>")
-        for c in contacts:
-            fio = _fio_from_bits(c) or f"Contact #{c.get('ID')}"
-            phs = ", ".join(_phones_from_contact(c)) or "—"
-            ems = ", ".join(_emails_from_contact(c)) or "—"
-            lines.append(f"• {fio} | 📞 {phs} | ✉️ {ems}")
-
-    if users:
-        lines.append("\n<b>Співробітники:</b>")
-        for u in users:
-            fio = _fio_from_bits(u) or f"User #{u.get('ID')}"
-            phone = (u.get("PERSONAL_MOBILE") or u.get("PERSONAL_PHONE") or "—")
-            email = (u.get("EMAIL") or "—")
-            lines.append(f"• {fio} | 📞 {phone} | ✉️ {email}")
-
-    lines.append("\nБудь ласка, привітайте 🎂")
-    return "\n".join(lines)
-
-# Ручний виклик: /birthdays (показати сьогоднішній список)
-def handle_birthdays_command(update: Update, context: CallbackContext):
-    contacts = _contacts_birthday_today()
-    users = _users_birthday_today()
-    msg = _build_birthday_message(contacts, users)
-    if not msg:
-        update.message.reply_text("Сьогодні іменинників немає.")
-        return
-    update.message.reply_text(msg, parse_mode="HTML", disable_web_page_preview=True)
-
-# Джоб: щоденне авто-нагадування
-def job_send_birthdays(context: CallbackContext):
-    key = "birthdays_daily_v1"
-    if _already_sent_today(key):
-        return
-    contacts = _contacts_birthday_today()
-    users = _users_birthday_today()
-    msg = _build_birthday_message(contacts, users)
-    if not msg:
-        return
-    for chat_id in (BIRTHDAY_CHATS or []):
-        try:
-            context.bot.send_message(
-                chat_id=chat_id,
-                text=msg,
-                parse_mode="HTML",
-                disable_web_page_preview=True
-            )
-        except Exception as e:
-            print(f"Birthday send error to {chat_id}: {e}")
-    _mark_sent_today(key)
-
 
 # === Bitrix: создание/закрытие задачи (для рабочих записей) ===
 def create_task(contact_id, category, comment, responsible_id):
@@ -534,25 +330,14 @@ def main():
     updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
 
-    # Команди
+    # Команда /info
     dp.add_handler(CommandHandler("info", handle_info_command))
-    dp.add_handler(CommandHandler("birthdays", handle_birthdays_command))  # <- нова команда
 
-    # Логування робочих повідомлень
+    # Логирование рабочих сообщений
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-
-    # === JobQueue: щодня о 09:00 за вашою TZ ===
-    # Можеш змінити час тут:
-    run_hour = 11
-    run_minute = 10
-    job_time = datetime.now(TZ).replace(hour=run_hour, minute=run_minute, second=0, microsecond=0).timetz()
-
-    jq = updater.job_queue
-    jq.run_daily(job_send_birthdays, time=job_time, name="birthdays_daily")
 
     updater.start_polling()
     updater.idle()
-
 
 if __name__ == "__main__":
     main()
