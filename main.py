@@ -9,7 +9,7 @@ from telegram.ext import Updater, MessageHandler, Filters, CallbackContext, Comm
 from google.oauth2.service_account import Credentials
 from collections import Counter
 from typing import List, Dict, Any
-from zoneinfo import ZoneInfo
+import pytz  # <<< используем pytz для таймзон
 
 # === НАСТРОЙКИ ===
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -25,7 +25,7 @@ SUPPORT_CHAT_IDS = [
     if x.strip().lstrip("-").isdigit()
 ]
 
-# Таймзона/время ежедневной проверки
+# Таймзона/время ежедневной проверки (pytz)
 TZ_NAME = os.environ.get("TZ_NAME", "Europe/Kyiv")
 BIRTHDAY_CHECK_HOUR = int(os.environ.get("BIRTHDAY_CHECK_HOUR", "9"))
 BIRTHDAY_CHECK_MINUTE = int(os.environ.get("BIRTHDAY_CHECK_MINUTE", "0"))
@@ -86,7 +86,6 @@ def normalize_phone(phone: str) -> str:
     if digits.startswith("0"):
         digits = "38" + digits
     if not digits.startswith("380"):
-        # убрать лишние ведущие 380 и добавить один раз
         digits = "380" + digits.lstrip("380")
     return "+" + digits
 
@@ -164,11 +163,14 @@ def find_contact_by_phone(phone):
     return None
 
 # === Bitrix: дни рождения ===
-def today_month_day(tz_name: str = TZ_NAME):
+def _now_tz():
     try:
-        now = datetime.now(ZoneInfo(tz_name))
+        return datetime.now(pytz.timezone(TZ_NAME))
     except Exception:
-        now = datetime.now()
+        return datetime.now()
+
+def today_month_day():
+    now = _now_tz()
     return now.month, now.day
 
 def parse_b24_date(d: str):
@@ -192,7 +194,6 @@ def b24_get_employees_birthday_today() -> List[Dict[str, Any]]:
         return []
 
     month_today, day_today = today_month_day()
-    # ACTIVE: 'Y' или 'true' — оба нормально воспринимаются.
     items = b24_paged_get(
         BITRIX_USERS_URL,
         {
@@ -303,8 +304,9 @@ def create_task(contact_id, category, comment, responsible_id):
         print("⚠ BITRIX_TASK_URL not set; skip create_task")
         return
 
-    now = datetime.now()
+    now = _now_tz()
     deadline = now + timedelta(days=1)
+    # Строка в локальном времени, часовой пояс фиксируем как +03:00 (как было у вас)
     deadline_str = deadline.strftime("%Y-%m-%dT%H:%M:%S+03:00")
 
     payload = {
@@ -362,7 +364,7 @@ def aggregate_client_info_from_sheet(phone: str, days: int):
     values = sheet.get_all_values()  # ожидаем: [timestamp, employee, category(code), phone, comment, status]
 
     phone_norm = normalize_phone(phone)
-    since_dt = datetime.now() - timedelta(days=days)
+    since_dt = _now_tz() - timedelta(days=days)
 
     rows = []
     for row in values:
@@ -393,7 +395,7 @@ def aggregate_client_info_from_sheet(phone: str, days: int):
             except Exception:
                 continue
 
-        if ts < since_dt or phone_row != phone_norm:
+        if ts < since_dt.replace(tzinfo=None) or phone_row != phone_norm:
             continue
 
         rows.append({
@@ -501,7 +503,7 @@ def handle_message(update: Update, context: CallbackContext):
 
     code, phone, comment = parsed
     category = CATEGORIES.get(code, "Невідома категорія")
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = _now_tz().strftime("%Y-%m-%d %H:%M:%S")
 
     # співробітник
     employee_data = EMPLOYEES.get(update.message.from_user.id)
@@ -544,14 +546,13 @@ def main():
     # Логирование рабочих сообщений
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
 
-    # Ежедневная проверка ДР
-    try:
-        tz = ZoneInfo(TZ_NAME)
-    except Exception:
-        tz = None
-    job_queue = updater.job_queue
-    # используем datetime.time через модуль datetime (он уже импортирован)
+    # Ежедневная проверка ДР (apscheduler требует pytz)
     import datetime as _dt
+    try:
+        tz = pytz.timezone(TZ_NAME)
+    except Exception:
+        tz = pytz.utc
+    job_queue = updater.job_queue
     job_queue.run_daily(
         notify_birthday_today,
         time=_dt.time(hour=BIRTHDAY_CHECK_HOUR, minute=BIRTHDAY_CHECK_MINUTE, tzinfo=tz),
