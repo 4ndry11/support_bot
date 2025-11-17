@@ -399,9 +399,11 @@ def parse_message(text: str):
         re.IGNORECASE | re.S
     )
     if not match:
+        print(f"❌ Сообщение не соответствует формату: {text}")
         return None
     code, phone, comment = match.groups()
     phone = normalize_phone(phone)
+    print(f"✅ Распознано: code={code}, phone={phone}, comment={comment[:50]}")
     return code.upper(), phone, comment.strip()
 
 # ==========================================
@@ -881,8 +883,14 @@ def handle_delete_category_command(update: Update, context: CallbackContext):
 
 def handle_message(update: Update, context: CallbackContext):
     """Обработка рабочих сообщений"""
+    # Логируем для отладки
+    print(f"📨 Получено сообщение из чата: {update.message.chat_id}")
+    print(f"🔧 Настроенный SUPPORT_CHAT_ID: {SUPPORT_CHAT_ID}")
+    print(f"📝 Текст сообщения: {update.message.text}")
+
     # Проверка чата
-    if update.message.chat_id != SUPPORT_CHAT_ID:
+    if SUPPORT_CHAT_ID != 0 and update.message.chat_id != SUPPORT_CHAT_ID:
+        print(f"⚠️ Сообщение из неразрешенного чата, игнорируем")
         return
 
     # Если это ответ на подтверждение дубликата
