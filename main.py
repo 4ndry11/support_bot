@@ -27,6 +27,9 @@ BITRIX_TASK_URL = os.environ["BITRIX_TASK_URL"]        # task.item.add
 # Админ (только для управления сотрудниками/категориями)
 ADMIN_TELEGRAM_ID = 727013047
 
+# Чат поддержки (бот работает только в этом чате)
+SUPPORT_CHAT_ID = int(os.environ.get("SUPPORT_CHAT_ID", 0))
+
 # Дефолтный ответственный для новых сотрудников
 RESPONSIBLE_ID = 596
 
@@ -241,7 +244,7 @@ def check_duplicate_record(employee_telegram_id, category_code, phone, minutes=5
                 WHERE employee_telegram_id = %s
                 AND category_code = %s
                 AND phone = %s
-                AND timestamp > NOW() - INTERVAL '%s minutes'
+                AND timestamp > NOW() - make_interval(mins => %s)
                 """,
                 (employee_telegram_id, category_code.upper(), phone, minutes)
             )
@@ -268,7 +271,7 @@ def get_records_by_phone(phone, days):
                 LEFT JOIN support_employees e ON r.employee_telegram_id = e.telegram_id
                 LEFT JOIN support_categories c ON r.category_code = c.code
                 WHERE r.phone = %s
-                AND r.timestamp > NOW() - INTERVAL '%s days'
+                AND r.timestamp > NOW() - make_interval(days => %s)
                 ORDER BY r.timestamp DESC
                 """,
                 (phone, days)
@@ -287,7 +290,7 @@ def get_team_stats(days):
                 """
                 SELECT COUNT(*) as total_records
                 FROM support_records
-                WHERE timestamp > NOW() - INTERVAL '%s days'
+                WHERE timestamp > NOW() - make_interval(days => %s)
                 """,
                 (days,)
             )
@@ -301,7 +304,7 @@ def get_team_stats(days):
                     COUNT(*) as count
                 FROM support_records r
                 LEFT JOIN support_employees e ON r.employee_telegram_id = e.telegram_id
-                WHERE r.timestamp > NOW() - INTERVAL '%s days'
+                WHERE r.timestamp > NOW() - make_interval(days => %s)
                 GROUP BY e.name
                 ORDER BY count DESC
                 """,
@@ -318,7 +321,7 @@ def get_team_stats(days):
                     COUNT(*) as count
                 FROM support_records r
                 LEFT JOIN support_categories c ON r.category_code = c.code
-                WHERE r.timestamp > NOW() - INTERVAL '%s days'
+                WHERE r.timestamp > NOW() - make_interval(days => %s)
                 GROUP BY c.name, c.code
                 ORDER BY count DESC
                 """,
@@ -351,7 +354,7 @@ def get_all_records(days):
                 FROM support_records r
                 LEFT JOIN support_employees e ON r.employee_telegram_id = e.telegram_id
                 LEFT JOIN support_categories c ON r.category_code = c.code
-                WHERE r.timestamp > NOW() - INTERVAL '%s days'
+                WHERE r.timestamp > NOW() - make_interval(days => %s)
                 ORDER BY r.timestamp DESC
                 """,
                 (days,)
@@ -878,6 +881,10 @@ def handle_delete_category_command(update: Update, context: CallbackContext):
 
 def handle_message(update: Update, context: CallbackContext):
     """Обработка рабочих сообщений"""
+    # Проверка чата
+    if update.message.chat_id != SUPPORT_CHAT_ID:
+        return
+
     # Если это ответ на подтверждение дубликата
     if context.user_data.get('awaiting_duplicate_confirmation'):
         handle_duplicate_confirmation(update, context)
