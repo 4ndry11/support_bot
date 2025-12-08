@@ -47,6 +47,8 @@ RESPONSIBLE_ID = 596
 # POSTGRESQL CONNECTION POOL
 # ==========================================
 pool = None
+categories_cache = None
+categories_cache_time = None
 
 def init_pool():
     global pool
@@ -154,6 +156,7 @@ def get_category_by_code(code):
 
 def add_category(code, name):
     """Добавить категорию"""
+    global categories_cache, categories_cache_time
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -167,6 +170,9 @@ def add_category(code, name):
                 (code.upper(), name)
             )
             conn.commit()
+            # Сбрасываем кэш
+            categories_cache = None
+            categories_cache_time = None
             return True
     except Exception as e:
         conn.rollback()
@@ -177,6 +183,7 @@ def add_category(code, name):
 
 def delete_category(code):
     """Удалить категорию"""
+    global categories_cache, categories_cache_time
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -185,6 +192,9 @@ def delete_category(code):
                 (code.upper(),)
             )
             conn.commit()
+            # Сбрасываем кэш
+            categories_cache = None
+            categories_cache_time = None
             return cur.rowcount > 0
     except Exception as e:
         conn.rollback()
@@ -193,15 +203,30 @@ def delete_category(code):
     finally:
         release_conn(conn)
 
-def get_all_categories():
-    """Получить все категории"""
+def get_all_categories(use_cache=True):
+    """Получить все категории (с кэшированием на 60 секунд)"""
+    global categories_cache, categories_cache_time
+
+    # Проверяем кэш
+    if use_cache and categories_cache is not None and categories_cache_time is not None:
+        if (datetime.now() - categories_cache_time).total_seconds() < 60:
+            return categories_cache
+
+    # Загружаем из БД
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
                 "SELECT * FROM support_categories ORDER BY code"
             )
-            return cur.fetchall()
+            result = cur.fetchall()
+
+            # Обновляем кэш
+            if use_cache:
+                categories_cache = result
+                categories_cache_time = datetime.now()
+
+            return result
     finally:
         release_conn(conn)
 
@@ -393,11 +418,20 @@ def parse_message(text: str):
     Парсинг рабочего сообщения формата:
     CODE +380XXXXXXXXX | Комментарий
     """
-    match = re.match(
-        r"^(CL1|CL2|CL3|SMS|SEC|NEW|REP|HS1|HS2|HS3)\s+(\+?[0-9]+)\s*\|\s*(.+)",
-        text.strip(),
-        re.IGNORECASE | re.S
-    )
+    # Получаем все доступные коды из БД
+    categories = get_all_categories()
+    if not categories:
+        print("❌ Нет категорий в базе данных")
+        return None
+
+    # Создаём список кодов для regex
+    codes = [cat['code'] for cat in categories]
+    codes_pattern = '|'.join(codes)
+
+    # Динамический regex на основе кодов из БД
+    pattern = rf"^({codes_pattern})\s+(\+?[0-9]+)\s*\|\s*(.+)"
+    match = re.match(pattern, text.strip(), re.IGNORECASE | re.S)
+
     if not match:
         print(f"❌ Сообщение не соответствует формату: {text}")
         return None
@@ -709,7 +743,7 @@ def handle_list_employees_command(update: Update, context: CallbackContext):
 
 def handle_list_categories_command(update: Update, context: CallbackContext):
     """Список всех категорий"""
-    categories = get_all_categories()
+    categories = get_all_categories(use_cache=False)
 
     if not categories:
         update.message.reply_text("❌ Немає категорій у базі")
@@ -884,9 +918,9 @@ def handle_delete_category_command(update: Update, context: CallbackContext):
 def handle_message(update: Update, context: CallbackContext):
     """Обработка рабочих сообщений"""
     # Логируем для отладки
-    print(f"📨 Получено сообщение из чата: {update.message.chat_id}")
-    print(f"🔧 Настроенный SUPPORT_CHAT_ID: {SUPPORT_CHAT_ID}")
-    print(f"📝 Текст сообщения: {update.message.text}")
+    print(f"📨 Получено сообщение из чата: {update.message.chat_id}", flush=True)
+    print(f"🔧 Настроенный SUPPORT_CHAT_ID: {SUPPORT_CHAT_ID}", flush=True)
+    print(f"📝 Текст сообщения: {update.message.text}", flush=True)
 
     # Проверка чата
     if SUPPORT_CHAT_ID != 0 and update.message.chat_id != SUPPORT_CHAT_ID:
