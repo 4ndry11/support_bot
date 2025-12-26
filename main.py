@@ -27,8 +27,9 @@ BITRIX_TASK_URL = os.environ["BITRIX_TASK_URL"]        # task.item.add
 # Админ (только для управления сотрудниками/категориями)
 ADMIN_TELEGRAM_ID = 727013047
 
-# Чат поддержки (бот работает только в этом чате)
-SUPPORT_CHAT_ID = int(os.environ.get("SUPPORT_CHAT_ID", 0))
+# ID чатов для отделов
+SUPPORT_CHAT_ID = -1003053461710  # Чат поддержки
+PRE_TRIAL_CHAT_ID = -5070042846   # Чат досудебки
 
 # Дефолтный ответственный для новых сотрудников
 RESPONSIBLE_ID = 596
@@ -47,8 +48,8 @@ RESPONSIBLE_ID = 596
 # POSTGRESQL CONNECTION POOL
 # ==========================================
 pool = None
-categories_cache = None
-categories_cache_time = None
+categories_cache = {}  # Кэш по департаментам: {'support': [...], 'pre_trial': [...]}
+categories_cache_time = {}  # Время кэша по департаментам
 
 def init_pool():
     global pool
@@ -67,31 +68,55 @@ def release_conn(conn):
     if pool:
         pool.putconn(conn)
 
+def get_department_by_chat_id(chat_id):
+    """Определить департамент по ID чата"""
+    if chat_id == SUPPORT_CHAT_ID:
+        return 'support'
+    elif chat_id == PRE_TRIAL_CHAT_ID:
+        return 'pre_trial'
+    return None
+
+def get_table_prefix(department):
+    """Получить префикс таблицы для департамента"""
+    if department == 'support':
+        return 'support'
+    elif department == 'pre_trial':
+        return 'pre_trial'
+    return None
+
 # ==========================================
 # DATABASE FUNCTIONS - EMPLOYEES
 # ==========================================
 
-def get_employee_by_telegram_id(telegram_id):
+def get_employee_by_telegram_id(telegram_id, department):
     """Получить сотрудника по Telegram ID"""
+    prefix = get_table_prefix(department)
+    if not prefix:
+        return None
+
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT * FROM support_employees WHERE telegram_id = %s",
+                f"SELECT * FROM {prefix}_employees WHERE telegram_id = %s",
                 (telegram_id,)
             )
             return cur.fetchone()
     finally:
         release_conn(conn)
 
-def add_employee(telegram_id, name, bitrix_id):
+def add_employee(telegram_id, name, bitrix_id, department):
     """Добавить сотрудника"""
+    prefix = get_table_prefix(department)
+    if not prefix:
+        return False
+
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """
-                INSERT INTO support_employees (telegram_id, name, bitrix_id)
+                f"""
+                INSERT INTO {prefix}_employees (telegram_id, name, bitrix_id)
                 VALUES (%s, %s, %s)
                 ON CONFLICT (telegram_id) DO UPDATE
                 SET name = EXCLUDED.name, bitrix_id = EXCLUDED.bitrix_id
@@ -107,13 +132,17 @@ def add_employee(telegram_id, name, bitrix_id):
     finally:
         release_conn(conn)
 
-def delete_employee(telegram_id):
+def delete_employee(telegram_id, department):
     """Удалить сотрудника"""
+    prefix = get_table_prefix(department)
+    if not prefix:
+        return False
+
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM support_employees WHERE telegram_id = %s",
+                f"DELETE FROM {prefix}_employees WHERE telegram_id = %s",
                 (telegram_id,)
             )
             conn.commit()
@@ -125,13 +154,17 @@ def delete_employee(telegram_id):
     finally:
         release_conn(conn)
 
-def get_all_employees():
+def get_all_employees(department):
     """Получить всех сотрудников"""
+    prefix = get_table_prefix(department)
+    if not prefix:
+        return []
+
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT * FROM support_employees ORDER BY name"
+                f"SELECT * FROM {prefix}_employees ORDER BY name"
             )
             return cur.fetchall()
     finally:
@@ -141,28 +174,36 @@ def get_all_employees():
 # DATABASE FUNCTIONS - CATEGORIES
 # ==========================================
 
-def get_category_by_code(code):
+def get_category_by_code(code, department):
     """Получить категорию по коду"""
+    prefix = get_table_prefix(department)
+    if not prefix:
+        return None
+
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT * FROM support_categories WHERE code = %s",
+                f"SELECT * FROM {prefix}_categories WHERE code = %s",
                 (code.upper(),)
             )
             return cur.fetchone()
     finally:
         release_conn(conn)
 
-def add_category(code, name):
+def add_category(code, name, department):
     """Добавить категорию"""
     global categories_cache, categories_cache_time
+    prefix = get_table_prefix(department)
+    if not prefix:
+        return False
+
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """
-                INSERT INTO support_categories (code, name)
+                f"""
+                INSERT INTO {prefix}_categories (code, name)
                 VALUES (%s, %s)
                 ON CONFLICT (code) DO UPDATE
                 SET name = EXCLUDED.name
@@ -170,9 +211,11 @@ def add_category(code, name):
                 (code.upper(), name)
             )
             conn.commit()
-            # Сбрасываем кэш
-            categories_cache = None
-            categories_cache_time = None
+            # Сбрасываем кэш для этого департамента
+            if department in categories_cache:
+                del categories_cache[department]
+            if department in categories_cache_time:
+                del categories_cache_time[department]
             return True
     except Exception as e:
         conn.rollback()
@@ -181,20 +224,26 @@ def add_category(code, name):
     finally:
         release_conn(conn)
 
-def delete_category(code):
+def delete_category(code, department):
     """Удалить категорию"""
     global categories_cache, categories_cache_time
+    prefix = get_table_prefix(department)
+    if not prefix:
+        return False
+
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM support_categories WHERE code = %s",
+                f"DELETE FROM {prefix}_categories WHERE code = %s",
                 (code.upper(),)
             )
             conn.commit()
-            # Сбрасываем кэш
-            categories_cache = None
-            categories_cache_time = None
+            # Сбрасываем кэш для этого департамента
+            if department in categories_cache:
+                del categories_cache[department]
+            if department in categories_cache_time:
+                del categories_cache_time[department]
             return cur.rowcount > 0
     except Exception as e:
         conn.rollback()
@@ -203,28 +252,31 @@ def delete_category(code):
     finally:
         release_conn(conn)
 
-def get_all_categories(use_cache=True):
+def get_all_categories(department, use_cache=True):
     """Получить все категории (с кэшированием на 60 секунд)"""
     global categories_cache, categories_cache_time
+    prefix = get_table_prefix(department)
+    if not prefix:
+        return []
 
-    # Проверяем кэш
-    if use_cache and categories_cache is not None and categories_cache_time is not None:
-        if (datetime.now() - categories_cache_time).total_seconds() < 60:
-            return categories_cache
+    # Проверяем кэш для этого департамента
+    if use_cache and department in categories_cache and department in categories_cache_time:
+        if (datetime.now() - categories_cache_time[department]).total_seconds() < 60:
+            return categories_cache[department]
 
     # Загружаем из БД
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                "SELECT * FROM support_categories ORDER BY code"
+                f"SELECT * FROM {prefix}_categories ORDER BY code"
             )
             result = cur.fetchall()
 
-            # Обновляем кэш
+            # Обновляем кэш для этого департамента
             if use_cache:
-                categories_cache = result
-                categories_cache_time = datetime.now()
+                categories_cache[department] = result
+                categories_cache_time[department] = datetime.now()
 
             return result
     finally:
@@ -234,14 +286,18 @@ def get_all_categories(use_cache=True):
 # DATABASE FUNCTIONS - RECORDS
 # ==========================================
 
-def add_record(employee_telegram_id, category_code, phone, comment):
+def add_record(employee_telegram_id, category_code, phone, comment, department):
     """Добавить запись"""
+    prefix = get_table_prefix(department)
+    if not prefix:
+        return None
+
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """
-                INSERT INTO support_records
+                f"""
+                INSERT INTO {prefix}_records
                 (employee_telegram_id, category_code, phone, comment)
                 VALUES (%s, %s, %s, %s)
                 RETURNING id
@@ -258,14 +314,18 @@ def add_record(employee_telegram_id, category_code, phone, comment):
     finally:
         release_conn(conn)
 
-def check_duplicate_record(employee_telegram_id, category_code, phone, minutes=5):
+def check_duplicate_record(employee_telegram_id, category_code, phone, department, minutes=5):
     """Проверить наличие дубликата за последние N минут"""
+    prefix = get_table_prefix(department)
+    if not prefix:
+        return False
+
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """
-                SELECT COUNT(*) FROM support_records
+                f"""
+                SELECT COUNT(*) FROM {prefix}_records
                 WHERE employee_telegram_id = %s
                 AND category_code = %s
                 AND phone = %s
@@ -278,13 +338,17 @@ def check_duplicate_record(employee_telegram_id, category_code, phone, minutes=5
     finally:
         release_conn(conn)
 
-def get_records_by_phone(phone, days):
+def get_records_by_phone(phone, days, department):
     """Получить записи по телефону за последние N дней"""
+    prefix = get_table_prefix(department)
+    if not prefix:
+        return []
+
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                """
+                f"""
                 SELECT
                     r.timestamp,
                     e.name as employee_name,
@@ -292,9 +356,9 @@ def get_records_by_phone(phone, days):
                     r.category_code,
                     r.phone,
                     r.comment
-                FROM support_records r
-                LEFT JOIN support_employees e ON r.employee_telegram_id = e.telegram_id
-                LEFT JOIN support_categories c ON r.category_code = c.code
+                FROM {prefix}_records r
+                LEFT JOIN {prefix}_employees e ON r.employee_telegram_id = e.telegram_id
+                LEFT JOIN {prefix}_categories c ON r.category_code = c.code
                 WHERE r.phone = %s
                 AND r.timestamp > NOW() - make_interval(days => %s)
                 ORDER BY r.timestamp DESC
@@ -305,16 +369,20 @@ def get_records_by_phone(phone, days):
     finally:
         release_conn(conn)
 
-def get_team_stats(days):
+def get_team_stats(days, department):
     """Получить статистику по команде за последние N дней"""
+    prefix = get_table_prefix(department)
+    if not prefix:
+        return {'total': 0, 'by_employee': [], 'by_category': []}
+
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             # Общая статистика
             cur.execute(
-                """
+                f"""
                 SELECT COUNT(*) as total_records
-                FROM support_records
+                FROM {prefix}_records
                 WHERE timestamp > NOW() - make_interval(days => %s)
                 """,
                 (days,)
@@ -323,12 +391,12 @@ def get_team_stats(days):
 
             # По сотрудникам
             cur.execute(
-                """
+                f"""
                 SELECT
                     e.name,
                     COUNT(*) as count
-                FROM support_records r
-                LEFT JOIN support_employees e ON r.employee_telegram_id = e.telegram_id
+                FROM {prefix}_records r
+                LEFT JOIN {prefix}_employees e ON r.employee_telegram_id = e.telegram_id
                 WHERE r.timestamp > NOW() - make_interval(days => %s)
                 GROUP BY e.name
                 ORDER BY count DESC
@@ -339,13 +407,13 @@ def get_team_stats(days):
 
             # По категориям
             cur.execute(
-                """
+                f"""
                 SELECT
                     c.name,
                     c.code,
                     COUNT(*) as count
-                FROM support_records r
-                LEFT JOIN support_categories c ON r.category_code = c.code
+                FROM {prefix}_records r
+                LEFT JOIN {prefix}_categories c ON r.category_code = c.code
                 WHERE r.timestamp > NOW() - make_interval(days => %s)
                 GROUP BY c.name, c.code
                 ORDER BY count DESC
@@ -362,13 +430,17 @@ def get_team_stats(days):
     finally:
         release_conn(conn)
 
-def get_all_records(days):
+def get_all_records(days, department):
     """Получить все записи за последние N дней (для экспорта)"""
+    prefix = get_table_prefix(department)
+    if not prefix:
+        return []
+
     conn = get_conn()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(
-                """
+                f"""
                 SELECT
                     r.timestamp,
                     e.name as employee_name,
@@ -376,9 +448,9 @@ def get_all_records(days):
                     r.category_code,
                     r.phone,
                     r.comment
-                FROM support_records r
-                LEFT JOIN support_employees e ON r.employee_telegram_id = e.telegram_id
-                LEFT JOIN support_categories c ON r.category_code = c.code
+                FROM {prefix}_records r
+                LEFT JOIN {prefix}_employees e ON r.employee_telegram_id = e.telegram_id
+                LEFT JOIN {prefix}_categories c ON r.category_code = c.code
                 WHERE r.timestamp > NOW() - make_interval(days => %s)
                 ORDER BY r.timestamp DESC
                 """,
@@ -413,15 +485,15 @@ def is_admin(user_id: int) -> bool:
 # ПАРСИНГ СООБЩЕНИЙ
 # ==========================================
 
-def parse_message(text: str):
+def parse_message(text: str, department):
     """
     Парсинг рабочего сообщения формата:
     CODE +380XXXXXXXXX | Комментарий
     """
-    # Получаем все доступные коды из БД
-    categories = get_all_categories()
+    # Получаем все доступные коды из БД для данного департамента
+    categories = get_all_categories(department)
     if not categories:
-        print("❌ Нет категорий в базе данных")
+        print(f"❌ Нет категорий в базе данных для {department}")
         return None
 
     # Создаём список кодов для regex
@@ -523,6 +595,12 @@ def handle_info_command(update: Update, context: CallbackContext):
     Команда: /info +380XXXXXXXXX, N
     Показывает информацию по клиенту за последние N дней
     """
+    # Определяем департамент по chat_id
+    department = get_department_by_chat_id(update.message.chat_id)
+    if not department:
+        update.message.reply_text("❌ Ця команда доступна тільки в чатах підтримки або досудебки")
+        return
+
     text = update.message.text.strip()
     m = re.match(r"^/info\s+([+\d()\-\s]+)\s*,\s*(\d+)$", text, re.IGNORECASE)
     if not m:
@@ -533,8 +611,8 @@ def handle_info_command(update: Update, context: CallbackContext):
     phone = normalize_phone(phone_raw)
     days = int(days_str)
 
-    # Получаем данные из БД
-    records = get_records_by_phone(phone, days)
+    # Получаем данные из БД для данного департамента
+    records = get_records_by_phone(phone, days, department)
 
     # ФИО клиента из CRM
     contact = find_contact_by_phone(phone)
@@ -608,6 +686,12 @@ def handle_team_stats_command(update: Update, context: CallbackContext):
     Команда: /team_stats N
     Показывает общую статистику по команде за последние N дней
     """
+    # Определяем департамент по chat_id
+    department = get_department_by_chat_id(update.message.chat_id)
+    if not department:
+        update.message.reply_text("❌ Ця команда доступна тільки в чатах підтримки або досудебки")
+        return
+
     text = update.message.text.strip()
     m = re.match(r"^/team_stats\s+(\d+)$", text, re.IGNORECASE)
     if not m:
@@ -615,7 +699,7 @@ def handle_team_stats_command(update: Update, context: CallbackContext):
         return
 
     days = int(m.group(1))
-    stats = get_team_stats(days)
+    stats = get_team_stats(days, department)
 
     since_dt = datetime.now() - timedelta(days=days)
     header = (
@@ -659,6 +743,12 @@ def handle_export_command(update: Update, context: CallbackContext):
     Команда: /export N
     Экспорт всех записей за последние N дней в Excel
     """
+    # Определяем департамент по chat_id
+    department = get_department_by_chat_id(update.message.chat_id)
+    if not department:
+        update.message.reply_text("❌ Ця команда доступна тільки в чатах підтримки або досудебки")
+        return
+
     text = update.message.text.strip()
     m = re.match(r"^/export\s+(\d+)$", text, re.IGNORECASE)
     if not m:
@@ -666,7 +756,7 @@ def handle_export_command(update: Update, context: CallbackContext):
         return
 
     days = int(m.group(1))
-    records = get_all_records(days)
+    records = get_all_records(days, department)
 
     if not records:
         update.message.reply_text("❌ Немає записів за цей період")
@@ -721,7 +811,13 @@ def handle_export_command(update: Update, context: CallbackContext):
 
 def handle_list_employees_command(update: Update, context: CallbackContext):
     """Список всех сотрудников"""
-    employees = get_all_employees()
+    # Определяем департамент по chat_id
+    department = get_department_by_chat_id(update.message.chat_id)
+    if not department:
+        update.message.reply_text("❌ Ця команда доступна тільки в чатах підтримки або досудебки")
+        return
+
+    employees = get_all_employees(department)
 
     if not employees:
         update.message.reply_text("❌ Немає співробітників у базі")
@@ -743,7 +839,13 @@ def handle_list_employees_command(update: Update, context: CallbackContext):
 
 def handle_list_categories_command(update: Update, context: CallbackContext):
     """Список всех категорий"""
-    categories = get_all_categories(use_cache=False)
+    # Определяем департамент по chat_id
+    department = get_department_by_chat_id(update.message.chat_id)
+    if not department:
+        update.message.reply_text("❌ Ця команда доступна тільки в чатах підтримки або досудебки")
+        return
+
+    categories = get_all_categories(department, use_cache=False)
 
     if not categories:
         update.message.reply_text("❌ Немає категорій у базі")
@@ -764,6 +866,15 @@ def start_add_employee(update: Update, context: CallbackContext):
     if not is_admin(update.message.from_user.id):
         update.message.reply_text("❌ У вас немає доступу до цієї команди")
         return ConversationHandler.END
+
+    # Определяем департамент по chat_id
+    department = get_department_by_chat_id(update.message.chat_id)
+    if not department:
+        update.message.reply_text("❌ Ця команда доступна тільки в чатах підтримки або досудебки")
+        return ConversationHandler.END
+
+    # Сохраняем департамент в контексте
+    context.user_data['department'] = department
 
     update.message.reply_text("Введіть Telegram ID співробітника:")
     return ADD_EMPLOYEE_TG_ID
@@ -795,8 +906,9 @@ def add_employee_name(update: Update, context: CallbackContext):
     name = update.message.text.strip()
     tg_id = context.user_data['new_employee_tg_id']
     bitrix_id = context.user_data['new_employee_bitrix_id']
+    department = context.user_data['department']
 
-    success = add_employee(tg_id, name, bitrix_id)
+    success = add_employee(tg_id, name, bitrix_id, department)
 
     if success:
         update.message.reply_text(
@@ -831,6 +943,12 @@ def handle_delete_employee_command(update: Update, context: CallbackContext):
         update.message.reply_text("❌ У вас немає доступу до цієї команди")
         return
 
+    # Определяем департамент по chat_id
+    department = get_department_by_chat_id(update.message.chat_id)
+    if not department:
+        update.message.reply_text("❌ Ця команда доступна тільки в чатах підтримки або досудебки")
+        return
+
     text = update.message.text.strip()
     m = re.match(r"^/delete_employee\s+(\d+)$", text, re.IGNORECASE)
     if not m:
@@ -838,7 +956,7 @@ def handle_delete_employee_command(update: Update, context: CallbackContext):
         return
 
     tg_id = int(m.group(1))
-    success = delete_employee(tg_id)
+    success = delete_employee(tg_id, department)
 
     if success:
         update.message.reply_text(f"✅ Співробітник з Telegram ID {tg_id} видалено")
@@ -854,6 +972,15 @@ def start_add_category(update: Update, context: CallbackContext):
     if not is_admin(update.message.from_user.id):
         update.message.reply_text("❌ У вас немає доступу до цієї команди")
         return ConversationHandler.END
+
+    # Определяем департамент по chat_id
+    department = get_department_by_chat_id(update.message.chat_id)
+    if not department:
+        update.message.reply_text("❌ Ця команда доступна тільки в чатах підтримки або досудебки")
+        return ConversationHandler.END
+
+    # Сохраняем департамент в контексте
+    context.user_data['department'] = department
 
     update.message.reply_text("Введіть код категорії (наприклад, CL1):")
     return ADD_CATEGORY_CODE
@@ -873,8 +1000,9 @@ def add_category_name(update: Update, context: CallbackContext):
     """Получение названия и сохранение"""
     name = update.message.text.strip()
     code = context.user_data['new_category_code']
+    department = context.user_data['department']
 
-    success = add_category(code, name)
+    success = add_category(code, name, department)
 
     if success:
         update.message.reply_text(f"✅ Категорія додано: {code} — {name}")
@@ -897,6 +1025,12 @@ def handle_delete_category_command(update: Update, context: CallbackContext):
         update.message.reply_text("❌ У вас немає доступу до цієї команди")
         return
 
+    # Определяем департамент по chat_id
+    department = get_department_by_chat_id(update.message.chat_id)
+    if not department:
+        update.message.reply_text("❌ Ця команда доступна тільки в чатах підтримки або досудебки")
+        return
+
     text = update.message.text.strip()
     m = re.match(r"^/delete_category\s+([A-Z0-9]+)$", text, re.IGNORECASE)
     if not m:
@@ -904,7 +1038,7 @@ def handle_delete_category_command(update: Update, context: CallbackContext):
         return
 
     code = m.group(1).upper()
-    success = delete_category(code)
+    success = delete_category(code, department)
 
     if success:
         update.message.reply_text(f"✅ Категорію {code} видалено")
@@ -919,27 +1053,29 @@ def handle_message(update: Update, context: CallbackContext):
     """Обработка рабочих сообщений"""
     # Логируем для отладки
     print(f"📨 Получено сообщение из чата: {update.message.chat_id}", flush=True)
-    print(f"🔧 Настроенный SUPPORT_CHAT_ID: {SUPPORT_CHAT_ID}", flush=True)
     print(f"📝 Текст сообщения: {update.message.text}", flush=True)
 
-    # Проверка чата
-    if SUPPORT_CHAT_ID != 0 and update.message.chat_id != SUPPORT_CHAT_ID:
+    # Определяем департамент по chat_id
+    department = get_department_by_chat_id(update.message.chat_id)
+    if not department:
         print(f"⚠️ Сообщение из неразрешенного чата, игнорируем")
         return
+
+    print(f"🏢 Департамент: {department}", flush=True)
 
     # Если это ответ на подтверждение дубликата
     if context.user_data.get('awaiting_duplicate_confirmation'):
         handle_duplicate_confirmation(update, context)
         return
 
-    parsed = parse_message(update.message.text)
+    parsed = parse_message(update.message.text, department)
     if not parsed:
         return
 
     code, phone, comment = parsed
 
     # Проверка категории
-    category = get_category_by_code(code)
+    category = get_category_by_code(code, department)
     if not category:
         update.message.reply_text(f"❌ Невідома категорія: {code}")
         return
@@ -947,7 +1083,7 @@ def handle_message(update: Update, context: CallbackContext):
     category_name = category['name']
 
     # Проверка сотрудника
-    employee = get_employee_by_telegram_id(update.message.from_user.id)
+    employee = get_employee_by_telegram_id(update.message.from_user.id, department)
     if employee:
         employee_name = employee['name']
         responsible_id = employee['bitrix_id']
@@ -960,6 +1096,7 @@ def handle_message(update: Update, context: CallbackContext):
         update.message.from_user.id,
         code,
         phone,
+        department,
         minutes=5
     )
 
@@ -972,7 +1109,8 @@ def handle_message(update: Update, context: CallbackContext):
             'comment': comment,
             'category_name': category_name,
             'employee_name': employee_name,
-            'responsible_id': responsible_id
+            'responsible_id': responsible_id,
+            'department': department
         }
 
         keyboard = [['Так', 'Ні']]
@@ -985,7 +1123,7 @@ def handle_message(update: Update, context: CallbackContext):
         return
 
     # Запись в БД
-    save_record(update, context, code, phone, comment, category_name, employee_name, responsible_id)
+    save_record(update, context, code, phone, comment, category_name, employee_name, responsible_id, department)
 
 def handle_duplicate_confirmation(update: Update, context: CallbackContext):
     """Обработка подтверждения дубликата"""
@@ -1002,14 +1140,15 @@ def handle_duplicate_confirmation(update: Update, context: CallbackContext):
                 pending['comment'],
                 pending['category_name'],
                 pending['employee_name'],
-                pending['responsible_id']
+                pending['responsible_id'],
+                pending['department']
             )
     else:
         update.message.reply_text("❌ Операція скасована", reply_markup=ReplyKeyboardRemove())
 
     context.user_data.clear()
 
-def save_record(update, context, code, phone, comment, category_name, employee_name, responsible_id):
+def save_record(update, context, code, phone, comment, category_name, employee_name, responsible_id, department):
     """Сохранить запись в БД и Bitrix"""
     # Контакт в Bitrix
     contact = find_contact_by_phone(phone)
@@ -1020,12 +1159,13 @@ def save_record(update, context, code, phone, comment, category_name, employee_n
     # Задача в Bitrix
     create_task(contact["ID"], category_name, comment, responsible_id)
 
-    # Запись в БД
+    # Запись в БД для данного департамента
     record_id = add_record(
         update.message.from_user.id,
         code,
         phone,
-        comment
+        comment,
+        department
     )
 
     if record_id:
